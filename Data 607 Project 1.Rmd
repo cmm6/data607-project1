@@ -1,0 +1,187 @@
+---
+title: "Data 607 Project 1"
+author: "Claire Meyer"
+date: "2/25/2021"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+In this document, we ingest a text file of information on players in a chess tournament. From there, we clean it up into a dataframe, supplement it with additional information about each player based on some lightweight analysis of results, and prepare it for export as a CSV. 
+
+### Preparing the dataset
+
+First, we need to set up needed libraries. In this document, we'll only be needing the tidyverse library, and RCurl to get the data from Github.
+
+```{r libraries}
+library(tidyverse)
+library(devtools)
+library(RCurl)
+```
+
+From there, we ingest the file and begin data preparations. I'm choosing "|" as my separator, as it splits up columns.
+
+```{r ingest-txt}
+tournament_file <- read.delim("http://raw.githubusercontent.com/cmm6/data607-project1/main/tournamentinfo.txt", header = FALSE, sep = "|")
+```
+
+At first inspection, the text file is configured in such a way that analysis is challenging - observations cross multiple rows, and the players are delineated by a dashed line. We'll need to remove these dummy rows, and reconfigure the data into a usable data frame. 
+
+```{r data-prep}
+# First, remove the dashed lines 
+# Leveraged code referenced here: https://stackoverflow.com/questions/8005154/conditionally-remove-dataframe-rows-with-r
+tournament_file <- subset(tournament_file,V1!= "-----------------------------------------------------------------------------------------")
+```
+
+Because the double rows follow a consistent pattern, we can take even and odd row numbers into separate data frames and rejoin into one to preserve all information, but in a single row per player.
+
+```{r double-rows}
+# Then, select every second row.
+tournament_one <- tournament_file %>%
+ filter(row_number() %% 2 == 1) # This is a familiar pattern that splits even and odd numbers.
+
+# To make the data more readable, I'll update column names. 
+colnames(tournament_one) <- c("player_num","name","total_pts","round_1","round_2","round_3","round_4","round_5","round_6","round_7")
+
+# We no longer need the header row from the text file, so we can remove the top row.
+tournament_one <- tournament_one[-1,]
+
+# To allow for easy joining to the second data frame, add a numeric ID determined by row number 
+# Leveraged code referenced here: https://stackoverflow.com/questions/16384933/create-an-id-row-number-column
+id <- rownames(tournament_one)
+tournament_one <- cbind(id=id, tournament_one)
+
+# Repeat the above steps with the second half of the original data frame.
+tournament_two <- tournament_file %>%
+ filter(row_number() %% 2 == 0)
+
+colnames(tournament_two) <- c("state","USCF_ID_rtg_pre_post","pts","round_1_out","round_2_out","round_3_out","round_4_out","round_5_out","round_6_out","round_7_out")
+
+tournament_two <- tournament_two[-1,]
+
+id <- rownames(tournament_two)
+tournament_two <- cbind(id=id, tournament_two)
+```
+
+Then we can merge our even and odd data frames into a single row per player, using our numeric ID.
+
+```{r join-data}
+# Merge the two data frames using the newly created ID field
+tournament_file <- merge(tournament_one,tournament_two,by="id")
+```
+
+### String Clean Up
+
+Now that we have one row per player, we still need to clean up some of these columns to get pre-rating and identify opponents. We can separate the ID and rating columns, then separate pre and post ratings into two columns. Because we're only focused on the pre-rating, we can leverage Regex to just identify the 4-digit score, and set it to numeric. 
+
+```{r pressure, echo=FALSE}
+# Split out pre post rating 
+tournament_file <- tournament_file %>%
+  separate(USCF_ID_rtg_pre_post,c("USCF_ID","rtg"),sep = "/") %>%
+  separate(rtg,c("rtg_pre","rtg_post"),sep = "->")
+
+#Clean up the pre column, to just get the four numbers that make up a score. We'll also make this numeric so we can find a mean later.
+# https://rstudio.com/wp-content/uploads/2016/09/RegExCheatsheet.pdf
+tournament_file$rtg_pre <- as.numeric(str_extract_all(tournament_file$rtg_pre,"\\d\\d\\d+"))
+
+#Clean up player number so it's also numeric, getting rid of any excess space
+tournament_file$player_num <- as.numeric(tournament_file$player_num)
+```
+
+### Finding the Opponent Mean
+
+Then we need to find the mean. There's likely a more elegant solution, but I broke this dataset into a few pieces, reorganized, and leveraged joins to get it into one place.
+
+First we create two data frames: one of each player and all of the player numbers they played, and one of all players and their pre-ratings. From there we can repeatedly join the two, to get the pre-rating of the opponent from each round. 
+
+```{r opponent_avg}
+# First, create a DF of players and each of their opponents' player numbers
+opponents_df <- tournament_file %>%
+  select(name,round_1, round_2, round_3, round_4, round_5, round_6, round_7)
+
+# Clean up the strings to just get the player number.
+opponents_df$round_1 <- as.numeric(str_extract_all(opponents_df$round_1,"\\d+"))
+opponents_df$round_2 <- as.numeric(str_extract_all(opponents_df$round_2,"\\d+"))
+opponents_df$round_3 <- as.numeric(str_extract_all(opponents_df$round_3,"\\d+"))
+opponents_df$round_4 <- as.numeric(str_extract_all(opponents_df$round_4,"\\d+"))
+opponents_df$round_5 <- as.numeric(str_extract_all(opponents_df$round_5,"\\d+"))
+opponents_df$round_6 <- as.numeric(str_extract_all(opponents_df$round_6,"\\d+"))
+opponents_df$round_7 <- as.numeric(str_extract_all(opponents_df$round_7,"\\d+"))
+
+# Then, create a DF of all players and their pre-rating
+pre_ratings <- tournament_file %>%
+  select(player_num, rtg_pre)
+
+# Merge the two on player_number. The actual merge function threw a list error, so I leveraged the code below to find the match.
+#https://stackoverflow.com/questions/37034242/r-add-a-new-column-to-a-dataframe-using-matching-values-of-another-dataframe
+opponents_df$pre_1 <- pre_ratings$rtg_pre[match(opponents_df$round_1, pre_ratings$player_num)]
+opponents_df$pre_2 <- pre_ratings$rtg_pre[match(opponents_df$round_2, pre_ratings$player_num)]
+opponents_df$pre_3 <- pre_ratings$rtg_pre[match(opponents_df$round_3, pre_ratings$player_num)]
+opponents_df$pre_4 <- pre_ratings$rtg_pre[match(opponents_df$round_4, pre_ratings$player_num)]
+opponents_df$pre_5 <- pre_ratings$rtg_pre[match(opponents_df$round_5, pre_ratings$player_num)]
+opponents_df$pre_6 <- pre_ratings$rtg_pre[match(opponents_df$round_6, pre_ratings$player_num)]
+opponents_df$pre_7 <- pre_ratings$rtg_pre[match(opponents_df$round_7, pre_ratings$player_num)]
+
+# Then create an average across all the rounds' columns, and subset the df to just the name and the average. I've rounded the mean down.
+# Adapted code here: https://stackoverflow.com/questions/34169190/how-to-get-the-average-of-two-columns-using-dplyr/34169356
+opponents_df <- opponents_df %>% 
+  mutate(pre_avg=round(rowMeans(cbind(pre_1,pre_2,pre_3,pre_4,pre_5,pre_6,pre_7), na.rm=TRUE))) %>%
+  select(name, pre_avg)
+```
+
+Finally, we can subset the total data frame for just the pieces we want: name, state, total points, pre-rating, and join against the average rating data frame above to get average opponent rating.
+
+```{r final_df}
+final_df <- tournament_file %>%
+  select(name,state,total_pts,rtg_pre)
+
+final_df <- merge(final_df,opponents_df,by="name")
+```
+
+## Exporting to CSV
+
+Finally, we export to a CSV file. 
+
+```{r export-data}
+write.csv(final_df,'chess_tournament_data.csv',row.names = TRUE)
+```
+
+
+## Exploring the data
+
+Out of curiosity, let's do some lightweight data exploration. 
+
+We see competitors typically get around 3.5 total points, but with several competitors getting up to 6. There's only one competitor in this set from Ohio, with the majority from Michigan. It looks like this data is similar to a normal distribution, though with few observations.
+
+```{r explore}
+# Summary of Ratings
+summary(final_df$total_pts)
+```
+
+```{r hist-pts}
+# Histogram of Total Points
+final_df$total_pts <- as.numeric(final_df$total_pts)
+ggplot(data=final_df,aes(x=total_pts)) + geom_histogram(aes(color=state))
+```
+
+Looking at average rating plotted against average competitor rating, there's not a clear trend, suggesting competitors are not necessarily grouped together by rating/rank. 
+
+```{r scatter-rating}
+# Scatter plot of player rating and average opponent rating, in case they grouped stronger players based on rank.
+ggplot(data=final_df,aes(rtg_pre,pre_avg)) + geom_point(aes(color=total_pts))
+```
+
+Looking at a box plot of pre-rating, all but one competitor fit within the plot.
+
+```{r box-rtg}
+boxplot(final_df$rtg_pre)
+```
+
+I would be curious to see data on a larger or more tournaments, and see if the distribution held as nearly normal. 
